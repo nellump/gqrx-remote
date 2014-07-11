@@ -17,6 +17,7 @@ Copyright (c) 2014 Rafael Marmelo
 
 import csv
 import os.path
+import re
 import telnetlib
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -57,6 +58,8 @@ class GqrxRemote(ttk.Frame):
     """Remote application that interacts with gqrx using rigctl protocol.
     Gqrx partially implements rigctl since version 2.3.
     """
+
+    SI_abbrevs = ('kHz', 'MHz', 'GHz', 'THz', 'PHz', 'EHz', 'ZHz', 'YHz')
 
     def __init__(self, root):
         ttk.Frame.__init__(self, root)
@@ -161,7 +164,6 @@ class GqrxRemote(ttk.Frame):
             with open(self.config, 'r') as file:
                 reader = csv.reader(file, delimiter=',')
                 for line in reader:
-                    line[0] = self._frequency_pp(line[0])
                     self.tree.insert('', tk.END, values=line)
 
     def csv_save(self):
@@ -170,7 +172,6 @@ class GqrxRemote(ttk.Frame):
             writer = csv.writer(file, delimiter=',')
             for item in self.tree.get_children():
                 values = self.tree.item(item).get('values')
-                values[0] = self._frequency_pp_parse(values[0])
                 writer.writerow(values)
 
     def cb_top(self):
@@ -184,10 +185,11 @@ class GqrxRemote(ttk.Frame):
         self.cbb_mode.delete(0, tk.END)
         self.txt_description.delete(0, tk.END)
         try:
-            frequency = self._connect().get_frequency()
+            freq_ugly = self._connect().get_frequency()
             mode = self._connect().get_mode()
             # update fields
-            self.txt_frequency.insert(0, self._frequency_pp(frequency))
+            freq_pretty = self._frequency_pp(freq_ugly)
+            self.txt_frequency.insert(0, freq_pretty)
             self.cbb_mode.insert(0, mode)
         except Exception as err:
             tkinter.messagebox.showerror("Error", "Could not connect to gqrx.\n%s" % err, parent=self)
@@ -197,7 +199,7 @@ class GqrxRemote(ttk.Frame):
         item = self.tree.focus()
         values = self.tree.item(item).get('values')
         try:
-            self._connect().set_frequency(values[0].replace(',', ''))
+            self._connect().set_frequency(self._frequency_pp_parse(values[0]))
             self._connect().set_mode(values[1])
         except Exception as err:
             tkinter.messagebox.showerror("Error", "Could not set frequency.\n%s" % err, parent=self)
@@ -216,18 +218,23 @@ class GqrxRemote(ttk.Frame):
     def cb_add(self):
         """Add frequency to tree."""
         # get values
-        frequency = self._frequency_pp_parse(self.txt_frequency.get())
+        new_freq = self.txt_frequency.get()
+        # Convert new freq string to integer and validate at the same time.
+        new_freq_ugly = self._frequency_pp_parse(new_freq)
+        # Normalize formatting of new frequency value.
+        # NB: this will prevent user from specifying e.g., "1070 kHz".
+        new_freq_pretty = self._frequency_pp(new_freq_ugly)
         mode = self.cbb_mode.get()
         description = self.txt_description.get()
         # find where to insert (insertion sort)
         idx = tk.END
         for item in self.tree.get_children():
-            curr_freq = self._frequency_pp_parse(self.tree.item(item).get('values')[0])
-            if frequency < curr_freq:
+            curr_freq_ugly = self._frequency_pp_parse(str(self.tree.item(item).get('values')[0]))
+            if new_freq_ugly < curr_freq_ugly:
                 idx = self.tree.index(item)
                 break
         # insert
-        item = self.tree.insert('', idx, values=[self._frequency_pp(frequency), mode, description])
+        item = self.tree.insert('', idx, values=[new_freq_pretty, mode, description])
         self.tree.selection_set(item)
         self.tree.focus(item)
         self.tree.see(item)
@@ -245,13 +252,46 @@ class GqrxRemote(ttk.Frame):
     def _connect(self):
         return RigCtl(self.txt_hostname.get(), self.txt_port.get())
 
-    def _frequency_pp(self, frequency):
-        """Add thousands separator."""
-        return '{:,}'.format(int(frequency))
+    def _frequency_pp(self, freq_ugly):
+        """Convert to SI multiple format."""
+        if type(freq_ugly) is not int:
+            raise ValueError
 
-    def _frequency_pp_parse(self, frequency):
-        """Remove thousands separator."""
-        return int(str(frequency).replace(',', ''))
+        i = -1  
+        while freq_ugly >= 1000:
+            freq_ugly /= 1000.
+            i += 1
+        else:
+            abbrev = GqrxRemote.SI_abbrevs[i]
+            freq_pretty = "{0} {1}".format(freq_ugly, abbrev)
+
+        return freq_pretty
+
+    def _frequency_pp_parse(self, freq_pretty):
+        """Convert frequency value string from human-readable to integer."""
+
+        # Validate and parse input.
+        pattern = '([\d,]+\.?\d*)\s*([kMGTPEZY]Hz)?(?i)'  # regexp could be improved
+        match = re.search(pattern, freq_pretty)
+        if match:
+            freq_base = match.group(1)
+            multiplier = match.group(2)
+        else:
+            raise ValueError
+
+        # Remove commas.
+        freq_base = freq_base.replace(',', '')
+        # Parse SI abbreviations.
+        if multiplier:
+            for abbreviation in GqrxRemote.SI_abbrevs:
+                if re.search("{0}(?i)".format(abbreviation), multiplier):
+                    exponent = GqrxRemote.SI_abbrevs.index(abbreviation) + 1
+            freq_ugly = float(freq_base) * 1000**exponent
+        else:
+            freq_ugly = freq_base
+
+        # TODO: deal with real-numbered frequencies (e.g., "144.125").
+        return int(freq_ugly)
 
 
 # entry point
